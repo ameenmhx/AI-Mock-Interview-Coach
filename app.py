@@ -1,50 +1,67 @@
 import streamlit as st
-import ollama
+from groq import Groq
 from pypdf import PdfReader
+import os
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="AI Mock Interview Coach", layout="wide")
-st.title("🤖 AI Mock Interview Coach")
+st.set_page_config(page_title="AI Career Coach", layout="wide")
+st.title("🤖 AI Career Coach")
+
+# --- INIT GROQ CLIENT ---
+# Automatically uses the key from .streamlit/secrets.toml
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 # --- SIDEBAR: SETUP ---
 with st.sidebar:
-    st.header("Setup Interview")
-    uploaded_file = st.file_uploader("1. Upload Resume (PDF)", type="pdf")
-    job_desc = st.text_area("2. Paste Job Description", "Junior Web Developer")
+    st.header("Setup")
     
-    # Button to start
-    if st.button("Start Interview"):
+    # Mode Selector
+    mode = st.radio("Choose Mode:", ["Interview Simulation", "Write My CV"])
+    
+    uploaded_file = st.file_uploader("Upload Existing Resume (Optional)", type="pdf")
+    job_desc = st.text_area("Paste Target Job Description", height=150)
+    
+    # For CV Writer
+    if mode == "Write My CV":
+        user_details = st.text_area("Your Raw Details (Education, Skills, Projects)", height=150)
+
+    if st.button("Start"):
         st.session_state.interview_started = True
         
-        # Read PDF if uploaded
+        # Read PDF
         resume_text = ""
         if uploaded_file:
             reader = PdfReader(uploaded_file)
             for page in reader.pages:
                 resume_text += page.extract_text()
-            # Clean text
             resume_text = resume_text.replace("  ", " ").strip()
         else:
             resume_text = "No resume uploaded."
 
-        # Set the System Prompt
-        st.session_state.messages = [{
-            'role': 'system',
-            'content': f"""
-            You are a Hiring Manager for a {job_desc} position.
-            Resume: {resume_text}
-            RULES:
-            1. Ask ONE short question at a time.
-            2. Use the candidate's name.
-            3. Start now.
+        # Dynamic Prompt
+        if mode == "Interview Simulation":
+            system_prompt = f"""
+            You are a Hiring Manager for this job: {job_desc}.
+            Candidate Resume: {resume_text}
+            RULES: Ask ONE short question at a time. Start now.
             """
-        }]
-        st.session_state.chat_history = [] # Clear visual history
-        st.rerun() # Refresh the app
+        else: # Write CV Mode
+            raw_info = st.session_state.get('user_details_input', '')
+            system_prompt = f"""
+            You are an expert Resume Writer.
+            Target Job: {job_desc}
+            Candidate Info: {raw_info}
+            Existing Resume Text: {resume_text}
+            
+            TASK: Write a professional, clean resume structure suitable for this job. 
+            Use bullet points for skills. Keep it concise.
+            """
+
+        st.session_state.messages = [{'role': 'system', 'content': system_prompt}]
+        st.session_state.chat_history = []
+        st.rerun()
 
 # --- MAIN CHAT AREA ---
-
-# Initialize session state variables if they don't exist
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "chat_history" not in st.session_state:
@@ -52,53 +69,58 @@ if "chat_history" not in st.session_state:
 if "interview_started" not in st.session_state:
     st.session_state.interview_started = False
 
-# Display Chat History (The visual bubbles)
+# Display Chat History
 for message in st.session_state.chat_history:
     with st.chat_message(message['role']):
         st.write(message['content'])
 
-# The Chat Input Box
-if prompt := st.chat_input("Type your answer here..."):
-    # 1. Add user message to history
+# Chat Input
+if prompt := st.chat_input("Type here..."):
     st.session_state.chat_history.append({'role': 'user', 'content': prompt})
-    
-    # Display user message immediately
     with st.chat_message('user'):
         st.write(prompt)
-
-    # 2. Add to AI memory
     st.session_state.messages.append({'role': 'user', 'content': prompt})
 
-    # 3. Get AI response
     with st.chat_message('assistant'):
-        # Stream the response
-        response_stream = ollama.chat(
-            model='phi3', 
-            messages=st.session_state.messages, 
-            stream=True,
-            options={'temperature': 0.1}
+        # GROQ API CALL (Streaming)
+        response_stream = client.chat.completions.create(
+            model="llama-3.1-8b-instant", # UPDATED MODEL NAME
+            messages=st.session_state.messages,
+            stream=True
         )
         
-        # Write word by word
-        response_text = st.write_stream(chunk['message']['content'] for chunk in response_stream)
+        # Handle the Groq stream format
+        def stream_generator():
+            for chunk in response_stream:
+                if chunk.choices[0].delta.content is not None:
+                    yield chunk.choices[0].delta.content
+
+        response_text = st.write_stream(stream_generator)
         
-        # Save to AI memory
         st.session_state.messages.append({'role': 'assistant', 'content': response_text})
-        # Save to visual history
         st.session_state.chat_history.append({'role': 'assistant', 'content': response_text})
 
-# Initial Greeting Logic
+# Initial Greeting
 if st.session_state.interview_started and len(st.session_state.chat_history) == 0:
     with st.chat_message('assistant'):
         with st.spinner("Thinking..."):
-            response_stream = ollama.chat(
-                model='phi3', 
-                messages=st.session_state.messages, 
-                stream=True,
-                options={'temperature': 0.1}
+            response_stream = client.chat.completions.create(
+                model="llama-3.1-8b-instant", # UPDATED MODEL NAME
+                messages=st.session_state.messages,
+                stream=True
             )
-            response_text = st.write_stream(chunk['message']['content'] for chunk in response_stream)
+            
+            def stream_generator():
+                for chunk in response_stream:
+                    if chunk.choices[0].delta.content is not None:
+                        yield chunk.choices[0].delta.content
+            
+            response_text = st.write_stream(stream_generator)
             
             st.session_state.messages.append({'role': 'assistant', 'content': response_text})
             st.session_state.chat_history.append({'role': 'assistant', 'content': response_text})
             st.rerun()
+            
+# Capture raw details for CV mode
+if mode == "Write My CV":
+    st.session_state['user_details_input'] = user_details
